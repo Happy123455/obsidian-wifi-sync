@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-electron/
+release-builds/
+obsidian-plugin/main.js
+
+# System & Environment
+.DS_Store
+*.log

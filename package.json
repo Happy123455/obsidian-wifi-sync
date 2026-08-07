@@ -1,0 +1,35 @@
+{
+  "name": "obsidian-vault-sync",
+  "version": "1.0.0",
+  "description": "Standalone macOS desktop application to sync Obsidian vault from Android to Mac over USB",
+  "main": "dist-electron/main.js",
+  "author": "Antigravity",
+  "license": "MIT",
+  "scripts": {
+    "dev:renderer": "vite",
+    "build:renderer": "vite build",
+    "build:electron": "esbuild electron/main.ts --bundle --platform=node --external:electron --outfile=dist-electron/main.js && esbuild electron/preload.ts --bundle --platform=node --external:electron --outfile=dist-electron/preload.js",
+    "build:plugin": "esbuild obsidian-plugin/main.ts --bundle --platform=browser --format=cjs --external:obsidian --outfile=obsidian-plugin/main.js",
+    "dev": "npm run build && electron . --dev",
+    "build": "npm run build:renderer && npm run build:electron && npm run build:plugin",
+    "package": "npm run build && npx electron-packager . \"Obsidian Sync\" --platform=darwin --arch=arm64 --icon=icon.icns --out=release-builds --overwrite --ignore=\"^/(src|electron|release-builds|tsconfig\\\\.json|vite\\\\.config\\\\.ts|create_icon\\\\.sh|icon\\\\.png|\\\\.git|\\\\.vscode|test\\\\.iconset|icon\\\\.iconset)\""
+  },
+  "dependencies": {
+    "@types/qrcode": "^1.5.6",
+    "html5-qrcode": "^2.3.8",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.2.1",
+    "electron": "^30.0.1",
+    "electron-packager": "^17.1.2",
+    "esbuild": "^0.20.2",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.10"
+  }
+}
