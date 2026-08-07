@@ -8,6 +8,17 @@ interface WifiSyncSettings {
   syncMode: 'standard' | 'live';
 }
 
+const syncLogs: string[] = [];
+
+function logSyncEvent(device: string, category: string, details: string) {
+  const now = new Date();
+  const timestamp = now.toISOString().split('T')[1].slice(0, 12); // HH:mm:ss.SSS
+  const logLine = `[${timestamp}] [${device}] [${category}] ${details}`;
+  syncLogs.push(logLine);
+  if (syncLogs.length > 500) syncLogs.shift();
+  console.log(`⚡ ${logLine}`);
+}
+
 function smartMergeNote(macContent: string, mobileContent: string): string {
   if (macContent === mobileContent) return macContent;
   if (!macContent.trim()) return mobileContent;
@@ -214,6 +225,14 @@ export default class WifiSyncPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: 'show-sync-logs',
+      name: 'Show Real-Time Live Sync Diagnostic Logs',
+      callback: () => {
+        new SyncLogModal(this.app).open();
+      }
+    });
+
+    this.addCommand({
       id: 'toggle-sync-mode',
       name: 'Toggle Sync Mode (Standard <-> Live)',
       callback: async () => {
@@ -305,6 +324,7 @@ export default class WifiSyncPlugin extends Plugin {
   isMobileWriting = false;
   mobileWritingTimer: any = null;
   isSendingLiveUpdate = false;
+  lastMacTypedContent = '';
 
   async handleLiveEditorChange(filePath: string, content: string, cursor?: { line: number; ch: number }) {
     if (this.isRemoteUpdating) return;
@@ -323,6 +343,13 @@ export default class WifiSyncPlugin extends Plugin {
       this.isSelfEditing = true;
 
       if (Platform.isDesktopApp) {
+        // Only treat as a genuine Mac keyboard edit if text content actually changed!
+        // This prevents background rescan/auto-save/focus events from mistaking disk reloads as Mac typing!
+        if (content === this.lastMacTypedContent) return;
+        this.lastMacTypedContent = content;
+
+        logSyncEvent('MAC', 'LOCAL_EDIT', `Path=${filePath}, len=${content.length}, cursor=${JSON.stringify(cursor)}`);
+
         // Mac is writing: record state for mobile fast poll
         this.macLiveState = {
           path: filePath,
@@ -349,6 +376,7 @@ export default class WifiSyncPlugin extends Plugin {
         // Mobile is writing: send non-blocking PUT to Mac (no request queueing lag!)
         if (!this.isSendingLiveUpdate) {
           this.isSendingLiveUpdate = true;
+          logSyncEvent('MOBILE', 'LOCAL_EDIT', `Path=${filePath}, len=${content.length}, cursor=${JSON.stringify(cursor)}`);
           this.updateStatusBar('🔴 Live: Phone Writing (Mac Locked)');
 
           const baseUrl = this.settings.macUrl.replace(/\/$/, '');
@@ -409,7 +437,7 @@ export default class WifiSyncPlugin extends Plugin {
         const hasCursorMoved = cLine !== this.lastSeenMacCursorLine || cCh !== this.lastSeenMacCursorCh;
         const hasContentChanged = data.content !== undefined && (data.mtime > this.lastSeenMacLiveMtime || hasCursorMoved);
 
-        if (data && data.path && hasContentChanged) {
+        if (data && data.path && data.sender === 'mac' && data.isActivelyWriting === true && hasContentChanged) {
           this.lastSeenMacLiveMtime = data.mtime;
           this.lastSeenMacCursorLine = cLine;
           this.lastSeenMacCursorCh = cCh;
@@ -417,10 +445,11 @@ export default class WifiSyncPlugin extends Plugin {
           let activeFile = this.app.workspace.getActiveFile();
           const activeView = this.app.workspace.getActiveViewOfType(require('obsidian').MarkdownView);
           const currentContent = activeView?.editor ? activeView.editor.getValue() : null;
+          const hasMobileEditorFocus = activeView?.editor && (activeView.editor as any).hasFocus ? (activeView.editor as any).hasFocus() : false;
+
+          logSyncEvent('MOBILE', 'RECEIVE_MAC_STREAM', `Path=${data.path}, activeWriting=${data.isActivelyWriting}, mobileFocus=${hasMobileEditorFocus}, cursor=${JSON.stringify(data.cursor)}`);
 
           // 1. ONLY write file to disk if Mac was the author AND content actually changed!
-          // NEVER write to disk when Mobile authored the change — this avoids triggering
-          // Obsidian's file watcher which resets the mobile cursor to line 0!
           if (data.sender === 'mac' && data.content !== currentContent) {
             this.isRemoteUpdating = true;
             if (await this.app.vault.adapter.exists(data.path)) {
@@ -441,15 +470,20 @@ export default class WifiSyncPlugin extends Plugin {
             }
           }
 
-          // 3. ONLY update editor / cursor on mobile if Mac user is ACTIVELY writing right now!
-          if (data.isActivelyWriting && data.sender === 'mac' && activeFile && activeFile.path === data.path) {
+          // 3. ONLY update editor / cursor on mobile if Mac user is ACTIVELY writing AND Mobile user is not currently focused editing!
+          if (data.isActivelyWriting && data.sender === 'mac' && !hasMobileEditorFocus && activeFile && activeFile.path === data.path) {
             if (activeView && activeView.editor) {
               this.isRemoteUpdating = true;
-              if (activeView.editor.getValue() !== data.content) {
+              const normRemote = data.content.replace(/\r\n/g, '\n').trim();
+              const normLocal = activeView.editor.getValue().replace(/\r\n/g, '\n').trim();
+
+              if (normRemote !== normLocal) {
+                logSyncEvent('MOBILE', 'SET_VALUE', `Updating content from Mac len=${data.content.length}`);
                 activeView.editor.setValue(data.content);
               }
               if (data.cursor) {
                 const pos = { line: data.cursor.line, ch: data.cursor.ch };
+                logSyncEvent('MOBILE', 'SET_CURSOR', `Moving mobile cursor to line=${pos.line}, ch=${pos.ch}`);
                 activeView.editor.setCursor(pos);
                 if (typeof (activeView.editor as any).setSelection === 'function') {
                   activeView.editor.setSelection(pos, pos);
@@ -462,9 +496,8 @@ export default class WifiSyncPlugin extends Plugin {
                 this.isRemoteUpdating = false;
               }, 500);
             }
-            if (activeView && activeView.previewMode && typeof (activeView.previewMode as any).rerender === 'function') {
-              (activeView.previewMode as any).rerender(true);
-            }
+          } else if (hasMobileEditorFocus) {
+            logSyncEvent('MOBILE', 'SHIELD_MOBILE_CURSOR', `Mobile editor has focus. Overwrite skipped to protect mobile cursor.`);
           }
 
           this.isRemoteUpdating = false;
@@ -751,6 +784,7 @@ export default class WifiSyncPlugin extends Plugin {
                     if (activeView.editor.getValue() !== contentStr) {
                       activeView.editor.setValue(contentStr);
                     }
+                    this.lastMacTypedContent = contentStr; // Synchronize Mac's content buffer so background rescan won't trigger false Mac edit!
                     if (!isNaN(cLine) && !isNaN(cCh)) {
                       const pos = { line: cLine, ch: cCh };
                       activeView.editor.setCursor(pos);
@@ -1622,7 +1656,7 @@ class WifiSyncSettingTab extends PluginSettingTab {
         .addOption('live', 'Live Mode (Real-Time Live Stream & Lock)')
         .setValue(this.plugin.settings.syncMode || 'standard')
         .onChange(async (value: 'standard' | 'live') => {
-          this.plugin.settings.syncMode = value;
+      this.plugin.settings.syncMode = value;
           await this.plugin.saveSettings();
           this.plugin.updateStatusBar(value === 'live' ? '⚡ Live Mode' : '⚪ Ready');
           new Notice(`Sync Mode: ${value === 'live' ? '⚡ Live Mode (Active Stream & Lock)' : '🛡️ Standard Mode (Smart Section Merge)'}`);
@@ -1650,5 +1684,29 @@ class WifiSyncSettingTab extends PluginSettingTab {
             new Notice('❌ Connection Failed. Check IP and Wi-Fi.');
           }
         }));
+  }
+}
+
+class SyncLogModal extends Modal {
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl('h2', { text: '⚡ Live Sync Microsecond Diagnostic Logs' });
+    contentEl.createEl('p', { text: `Total high-precision events recorded: ${syncLogs.length}` });
+
+    const logContainer = contentEl.createEl('pre', {
+      style: 'background: #1e1e1e; color: #00ff66; padding: 12px; border-radius: 6px; max-height: 450px; overflow-y: auto; font-family: monospace; font-size: 11px; white-space: pre-wrap;'
+    });
+
+    logContainer.setText(syncLogs.length > 0 ? syncLogs.join('\n') : 'No sync events logged yet.');
+
+    const btn = contentEl.createEl('button', { text: 'Refresh Logs' });
+    btn.onclick = () => {
+      logContainer.setText(syncLogs.length > 0 ? syncLogs.join('\n') : 'No sync events logged yet.');
+    };
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
